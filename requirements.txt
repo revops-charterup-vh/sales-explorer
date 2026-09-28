@@ -1,0 +1,7 @@
+redshift_connector
+simple_salesforce
+google-auth
+google-auth-httplib2
+google-api-python-client
+pandas
+python-dotenv
