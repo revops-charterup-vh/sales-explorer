@@ -24,7 +24,9 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Write Google credentials to file
-        run: echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > /tmp/gcp_key.json
+        env:
+          GOOGLE_CREDS: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: echo "$GOOGLE_CREDS" > /tmp/gcp_key.json
 
       - name: Run pipeline
         env:
