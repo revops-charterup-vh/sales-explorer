@@ -1,0 +1,42 @@
+name: Run Shuttles Pipeline
+
+on:
+  schedule:
+    - cron: '0 12 * * *'    # 8:00 AM ET
+    - cron: '30 15 * * *'   # 11:30 AM ET
+    - cron: '0 22 * * *'    # 6:00 PM ET
+  workflow_dispatch:         # allows manual trigger from GitHub UI
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write Google credentials to file
+        run: echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > /tmp/gcp_key.json
+
+      - name: Run pipeline
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DATABASE: ${{ secrets.REDSHIFT_DATABASE }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+          SF_USERNAME: ${{ secrets.SF_USERNAME }}
+          SF_PASSWORD: ${{ secrets.SF_PASSWORD }}
+          SF_SECURITY_TOKEN: ${{ secrets.SF_SECURITY_TOKEN }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: /tmp/gcp_key.json
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          SETTINGS_SHEET_ID: ${{ secrets.SETTINGS_SHEET_ID }}
+        run: python3 shuttles_pipeline.py
