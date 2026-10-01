@@ -172,7 +172,14 @@ SELECT
     ACV__c,
     Sourced_by_SDR__r.Name,
     Share_Credit_With__r.Name,
-    Credit_To_Share__c
+    Credit_To_Share__c,
+    Account.ZI_Industry__c,
+    Lead_Type_Detail__c,
+    Requires_Formal_RFP_Process__c,
+    Closed_Lost_Notes__c,
+    Markup__c,
+    IsWon,
+    IsClosed
 FROM Opportunity
 WHERE (IsClosed = false OR CloseDate >= LAST_N_MONTHS:{lookback})
 ORDER BY CloseDate DESC
@@ -276,10 +283,18 @@ def fetch_opportunities(sf: Salesforce, conn) -> pd.DataFrame:
             "effective_end_date":      r.get("Effective_End_Date__c", "") or "",
             "rep_forecast_category":   r.get("Rep_Forecast_Category__c", "") or "",
             "acv":                     r.get("ACV__c") or 0,
-            # New fields ──────────────────────────────────────────────────────
+            # Attribution fields
             "Sourced_by_SDR__c":    sourced_by_bdr,    # display name of the sourcing BDR/SDR
             "Share_Credit_With__c": share_credit_with,  # display name of the rep sharing credit
             "Credit_To_Share__c":   credit_to_share,    # percentage (e.g. 50 for 50%)
+            # Pipeline Funnel Metrics fields ──────────────────────────────────
+            "zi_industry":          (r.get("Account") or {}).get("ZI_Industry__c", "") or "",
+            "lead_type_detail":     r.get("Lead_Type_Detail__c") or "",
+            "requires_rfp":         "Yes" if r.get("Requires_Formal_RFP_Process__c") else "No",
+            "closed_lost_notes":    r.get("Closed_Lost_Notes__c") or "",
+            "markup_pct":           r.get("Markup__c") or 0,
+            "is_won":               bool(r.get("IsWon", False)),
+            "is_closed":            bool(r.get("IsClosed", False)),
         })
 
     opps = pd.DataFrame(rows)
@@ -320,18 +335,55 @@ def fetch_field_history(sf: Salesforce) -> pd.DataFrame:
     log.info(f"  {len(records):,} field history records fetched")
     rows = []
     for r in records:
+        raw_dt = r.get("CreatedDate") or ""
         rows.append({
-            "opportunity_id": r.get("OpportunityId", ""),
-            "field":          r.get("Field", ""),
-            "old_value":      r.get("OldValue"),
-            "new_value":      r.get("NewValue"),
-            "created_date":   (r.get("CreatedDate") or "")[:10],
+            "opportunity_id":  r.get("OpportunityId", ""),
+            "field":           r.get("Field", ""),
+            "old_value":       r.get("OldValue"),
+            "new_value":       r.get("NewValue"),
+            "created_date":    raw_dt[:10],       # date-only; used by build_pipeline_history
+            "created_datetime": raw_dt,           # full ISO timestamp; used by build_stage_history
         })
     df = pd.DataFrame(rows) if rows else pd.DataFrame(
-        columns=["opportunity_id", "field", "old_value", "new_value", "created_date"]
+        columns=["opportunity_id", "field", "old_value", "new_value",
+                 "created_date", "created_datetime"]
     )
     log.info(f"  {len(df):,} history rows")
     return df
+
+
+# Stage name → numeric map shared with the Pipeline Funnel Metrics dashboard.
+STAGE_MAP = {
+    "0. Prospecting":    0,
+    "1. Identification": 1,
+    "2. Qualification":  2,
+    "3. Proposal":       3,
+    "4. Alignment":      4,
+    "5. Negotiation":    5,
+    "7. Closed Won":     7,
+    "9. Closed Lost":    9,
+}
+
+
+def build_stage_history(history_df: pd.DataFrame) -> pd.DataFrame:
+    """Extract StageName transitions for the Pipeline Funnel Metrics dashboard.
+
+    Returns one row per stage transition with columns:
+      opportunity_id, old_stage (int), new_stage (int), edit_date (ISO datetime string)
+    Rows where either old or new stage is unknown in STAGE_MAP are dropped.
+    """
+    log.info("Building stage history …")
+    sn = history_df[history_df["field"] == "StageName"].copy()
+    sn["old_stage"] = sn["old_value"].map(STAGE_MAP)
+    sn["new_stage"] = sn["new_value"].map(STAGE_MAP)
+    sn = sn.dropna(subset=["old_stage", "new_stage"])
+    sn["old_stage"] = sn["old_stage"].astype(int)
+    sn["new_stage"] = sn["new_stage"].astype(int)
+    out = sn[["opportunity_id", "old_stage", "new_stage", "created_datetime"]].copy()
+    out = out.rename(columns={"created_datetime": "edit_date"})
+    out = out.sort_values(["opportunity_id", "edit_date"]).reset_index(drop=True)
+    log.info(f"  {len(out):,} stage transition rows")
+    return out
 
 
 def build_pipeline_history(opps_df: pd.DataFrame, history_df: pd.DataFrame):
@@ -479,11 +531,13 @@ def build_pipeline_history(opps_df: pd.DataFrame, history_df: pd.DataFrame):
 
 
 SF_USERS_SOQL = """
-SELECT Name, Manager.Name
+SELECT Name, Manager.Name, CharterUP_Role__c
 FROM User
 WHERE IsActive = true
   AND UserType = 'Standard'
 """
+# NOTE: Verify that 'CharterUP_Role__c' is the correct API field name in your SF org.
+# This is used to identify sales roles (ISR, AE, CSP, Enterprise) in Pipeline Funnel Metrics.
 
 
 def fetch_users(sf: Salesforce) -> pd.DataFrame:
@@ -495,8 +549,9 @@ def fetch_users(sf: Salesforce) -> pd.DataFrame:
     for r in records:
         mgr_name = ((r.get("Manager") or {}).get("Name") or "")
         rows.append({
-            "user_name":    r.get("Name", ""),
-            "manager_name": mgr_name,
+            "user_name":      r.get("Name", ""),
+            "manager_name":   mgr_name,
+            "charterup_role": r.get("CharterUP_Role__c", "") or "",
         })
     df = pd.DataFrame(rows)
     df = df[df["user_name"].str.strip() != ""].reset_index(drop=True)
@@ -1128,6 +1183,13 @@ def main():
     users            = fetch_users(sf)
     field_history_df = fetch_field_history(sf)
 
+    # Join CharterUP Role onto opportunities by owner name.
+    role_map = users.set_index("user_name")["charterup_role"].to_dict()
+    opps["charterup_role"] = opps["owner"].map(role_map).fillna("")
+
+    # Build stage history CSV for Pipeline Funnel Metrics tab.
+    stage_history_df = build_stage_history(field_history_df)
+
     # Enrich trips with Salesforce account names.
     opp_accounts = (
         opps[["opportunity_id", "overall_account", "sf_account_name"]]
@@ -1154,6 +1216,7 @@ def main():
     log.info("Uploading files to Google Drive …")
     upsert_csv(drive,  DRIVE_FOLDER_ID, "trips_monthly.csv",    trips)
     upsert_csv(drive,  DRIVE_FOLDER_ID, "opportunities.csv",    opps)
+    upsert_csv(drive,  DRIVE_FOLDER_ID, "stage_history.csv",    stage_history_df)
     upsert_csv(drive,  DRIVE_FOLDER_ID, "accounts_ranked.csv",  accts)
     upsert_csv(drive,  DRIVE_FOLDER_ID, "users.csv",            users)
     upsert_csv(drive,  DRIVE_FOLDER_ID, "pipeline_history.csv",        pipe_hist_df)
