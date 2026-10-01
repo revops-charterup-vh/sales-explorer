@@ -67,6 +67,20 @@ OPP_LOOKBACK_MONTHS = int(os.getenv("OPP_LOOKBACK_MONTHS", "0"))
 
 # ── Redshift ────────────────────────────────────────────────────────────────────
 
+
+def _yes_no_blank(v):
+    """Requires Formal RFP: keep Yes / No / blank distinct (blank must not become "No")."""
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "Yes" if v else "No"
+    s = str(v).strip()
+    if s.lower() in ("yes", "true", "y", "1"):
+        return "Yes"
+    if s.lower() in ("no", "false", "n", "0"):
+        return "No"
+    return s
+
 def get_redshift_conn():
     return redshift_connector.connect(
         host=REDSHIFT_HOST,
@@ -298,7 +312,7 @@ def fetch_opportunities(sf: Salesforce, conn) -> pd.DataFrame:
             # Pipeline Funnel Metrics fields ──────────────────────────────────
             "zi_industry":          (r.get("Account") or {}).get("ZI_Industry__c", "") or "",
             "lead_type_detail":     r.get("Lead_Type_Detail__c") or "",
-            "requires_rfp":         "Yes" if r.get("Requires_Formal_RFP_Process__c") else "No",
+            "requires_rfp":         _yes_no_blank(r.get("Requires_Formal_RFP_Process__c")),
             "closed_lost_notes":    r.get("Closed_Lost_Notes__c") or "",
             "markup_pct":           r.get("Markup__c") or 0,
             "is_won":               bool(r.get("IsWon", False)),
