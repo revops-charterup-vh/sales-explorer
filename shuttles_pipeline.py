@@ -59,6 +59,11 @@ SETTINGS_SHEET_ID = os.environ.get("SETTINGS_SHEET_ID", "")  # same sheet used b
 # How far back to pull trip data (keep this generous so charts show full history)
 TRIP_LOOKBACK_MONTHS = 30
 
+# How far back to pull CLOSED opportunities (open ones are always included).
+# 0 = all time. Funnel Metrics needs the full history; set e.g. OPP_LOOKBACK_MONTHS=60
+# in the environment to limit it.
+OPP_LOOKBACK_MONTHS = int(os.getenv("OPP_LOOKBACK_MONTHS", "0"))
+
 
 # ── Redshift ────────────────────────────────────────────────────────────────────
 
@@ -181,9 +186,12 @@ SELECT
     IsWon,
     IsClosed
 FROM Opportunity
-WHERE (IsClosed = false OR CloseDate >= LAST_N_MONTHS:{lookback})
+{where}
 ORDER BY CloseDate DESC
-""".format(lookback=TRIP_LOOKBACK_MONTHS)
+""".format(where=(
+    "WHERE (IsClosed = false OR CloseDate >= LAST_N_MONTHS:%d)" % OPP_LOOKBACK_MONTHS
+    if OPP_LOOKBACK_MONTHS > 0 else ""
+))
 # NOTE: Sourced_by_SDR__c and Share_Credit_With__c are assumed to be User lookup fields.
 #       The query uses __r.Name to get the rep's display name rather than the 18-char User ID.
 #       If either field is a plain text field in your org (not a lookup), replace
@@ -538,6 +546,30 @@ WHERE IsActive = true
 """
 # NOTE: Verify that 'CharterUP_Role__c' is the correct API field name in your SF org.
 # This is used to identify sales roles (ISR, AE, CSP, Enterprise) in Pipeline Funnel Metrics.
+
+
+ACTIVE_SF_USERS_SOQL = """
+SELECT Id, Name, Username, CharterUP_Role__c, IsActive
+FROM User
+WHERE IsActive = true
+ORDER BY Name
+"""
+
+
+def fetch_active_sf_users(sf: Salesforce) -> pd.DataFrame:
+    """Active Salesforce users → active_sf_users.csv (drives "Active reps only" on Funnel Metrics)."""
+    log.info("Fetching active Salesforce users for active_sf_users.csv …")
+    records = sf.query_all(ACTIVE_SF_USERS_SOQL)["records"]
+    rows = [{
+        "Full Name":      r.get("Name", "") or "",
+        "CharterUP Role": r.get("CharterUP_Role__c", "") or "",
+        "Username":       r.get("Username", "") or "",
+        "Active":         "TRUE" if r.get("IsActive") else "FALSE",
+        "User ID":        r.get("Id", "") or "",
+    } for r in records]
+    df = pd.DataFrame(rows, columns=["Full Name", "CharterUP Role", "Username", "Active", "User ID"])
+    log.info(f"  {len(df):,} active users")
+    return df
 
 
 def fetch_users(sf: Salesforce) -> pd.DataFrame:
@@ -1181,6 +1213,7 @@ def main():
     opps             = fetch_opportunities(sf, conn)
     cup_lookup       = fetch_cup_accounts(sf)
     users            = fetch_users(sf)
+    active_sf_users  = fetch_active_sf_users(sf)
     field_history_df = fetch_field_history(sf)
 
     # Join CharterUP Role onto opportunities by owner name.
@@ -1222,6 +1255,7 @@ def main():
     upsert_csv(drive,  DRIVE_FOLDER_ID, "pipeline_history.csv",        pipe_hist_df)
     upsert_csv(drive,  DRIVE_FOLDER_ID, "pipeline_history_deals.csv",  pipe_hist_deals_df)
     upsert_csv(drive,  DRIVE_FOLDER_ID, "forecast_monthly.csv", forecast_df)
+    upsert_csv(drive,  DRIVE_FOLDER_ID, "active_sf_users.csv",  active_sf_users)
     upsert_json(drive, DRIVE_FOLDER_ID, "config.json",          config)
 
     conn.close()
